@@ -32,6 +32,7 @@ def attenuate_grant(
     resources: set[str],
     actions: set[str],
     destinations: set[str] | None = None,
+    purpose: str | None = None,
 ) -> Grant:
     """Create a child grant that cannot exceed its parent's scope."""
     destinations = destinations if destinations is not None else set(parent.destinations)
@@ -55,7 +56,7 @@ def attenuate_grant(
         parent_grant_id=parent.grant_id,
         task_id=parent.task_id,
         session_id=parent.session_id,
-        purpose=parent.purpose,
+        purpose=purpose or parent.purpose,
         resources=child_resources,
         actions=child_actions,
         destinations=child_destinations,
@@ -63,6 +64,31 @@ def attenuate_grant(
         delegation_depth=parent.delegation_depth + 1,
         policy_version=parent.policy_version,
     )
+
+
+def validate_delegation_chain(grant: Grant, grants: dict[str, Grant]) -> tuple[bool, str]:
+    """Validate that each registered child grant is a scope attenuation of its parent."""
+    seen: set[str] = set()
+    current = grant
+    while current.parent_grant_id is not None:
+        if current.grant_id in seen:
+            return False, "Delegation chain contains a cycle."
+        seen.add(current.grant_id)
+        parent = next((item for item in grants.values() if item.grant_id == current.parent_grant_id), None)
+        if parent is None:
+            return False, "Delegation parent grant is missing."
+        if (not current.resources.issubset(parent.resources)
+                or not current.actions.issubset(parent.actions)
+                or not current.destinations.issubset(parent.destinations)
+                or current.task_id != parent.task_id
+                or current.session_id != parent.session_id
+                or current.purpose != parent.purpose
+                or current.delegation_depth != parent.delegation_depth + 1
+                or current.max_delegation_depth != parent.max_delegation_depth
+                or current.delegation_depth > parent.max_delegation_depth):
+            return False, "Delegated grant exceeds or conflicts with parent authority."
+        current = parent
+    return True, "Delegation chain valid."
 
 
 def deliberately_inherit_grant(parent: Grant, child_principal: str) -> Grant:

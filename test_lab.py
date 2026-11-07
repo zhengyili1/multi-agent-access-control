@@ -1,4 +1,4 @@
-"""Small unittest suite for the lab; run with `python -m unittest test_lab.py`."""
+"""Run with `python3 -m unittest test_lab.py`."""
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,44 +11,61 @@ from models import ActionRequest
 class AuthorizationLabTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.context = build_context("contextual", str(Path(self.temp.name) / "audit.db"))
 
     def tearDown(self):
         self.temp.cleanup()
 
-    def request(self, action, resource, destination=None):
-        return ActionRequest("document_agent", action, resource, self.context.intent.purpose,
-                             self.context.task_id, self.context.session_id, destination,
-                             "confidential")
+    def context(self, mode):
+        return build_context(mode, str(Path(self.temp.name) / f"{mode}.db"))
 
-    def test_contextual_allows_relevant_document(self):
-        self.assertTrue(self.context.authorization_engine.authorize(
-            self.request("read", "relevant_documents")).allowed)
+    def req(self, ctx, action, resource, destination=None, purpose=None, content=""):
+        return ActionRequest("document_agent", action, resource, purpose or ctx.intent.purpose,
+                             ctx.task_id, ctx.session_id, destination, "confidential", content)
 
-    def test_contextual_denies_unrelated_record(self):
-        self.assertFalse(self.context.authorization_engine.authorize(
-            self.request("read", "hr_records")).allowed)
-
-    def test_contextual_denies_external_disclosure(self):
-        self.assertFalse(self.context.authorization_engine.authorize(
-            self.request("send_email", "external_email_service", "external_email")).allowed)
-
-    def test_inherited_mode_is_overprivileged(self):
-        inherited = build_context("inherited", str(Path(self.temp.name) / "inherited.db"))
-        self.assertIn("hr_records", inherited.grants["document_agent"].resources)
-        decision = inherited.authorization_engine.authorize(ActionRequest(
-            "document_agent", "read", "hr_records", inherited.intent.purpose,
-            inherited.task_id, inherited.session_id, content_classification="confidential"))
+    def test_inherited_grant_allows_deputy_attack(self):
+        ctx = self.context("inherited")
+        decision = ctx.authorization_engine.authorize(self.req(
+            ctx, "send_email", "external_email_service", "external_email",
+            content="Confidential employee incident details"))
         self.assertTrue(decision.allowed)
+
+    def test_rbac_denies_external_send(self):
+        ctx = self.context("rbac")
+        self.assertFalse(ctx.authorization_engine.authorize(self.req(
+            ctx, "send_email", "external_email_service", "external_email")).allowed)
+
+    def test_contextual_allows_relevant_read_and_denies_hr(self):
+        ctx = self.context("contextual")
+        self.assertTrue(ctx.authorization_engine.authorize(self.req(ctx, "read", "relevant_documents")).allowed)
+        self.assertFalse(ctx.authorization_engine.authorize(self.req(ctx, "read", "hr_records")).allowed)
+
+    def test_contextual_blocks_external_send(self):
+        ctx = self.context("contextual")
+        self.assertFalse(ctx.authorization_engine.authorize(self.req(
+            ctx, "send_email", "external_email_service", "external_email")).allowed)
+
+    def test_semantic_blocks_sensitive_external_content(self):
+        ctx = self.context("semantic")
+        decision = ctx.authorization_engine.authorize(self.req(
+            ctx, "send_email", "external_email_service", "external_email",
+            content="Alice employee confidential investigation report"))
+        self.assertFalse(decision.allowed)
+        self.assertFalse(decision.checks["semantic_risk"])
+
+    def test_semantic_blocks_purpose_laundering(self):
+        ctx = self.context("semantic")
+        self.assertFalse(ctx.authorization_engine.authorize(self.req(
+            ctx, "read", "relevant_documents", purpose="employee_profiling")).allowed)
 
     def test_delegation_cannot_expand_parent_scope(self):
         parent = make_root_grant("root", "task", "session", {"docs"}, {"read"}, {"internal"})
         with self.assertRaises(ValueError):
             attenuate_grant(parent, "child", {"docs", "payroll"}, {"read"})
 
-    def test_audit_chain(self):
-        self.context.authorization_engine.authorize(self.request("read", "relevant_documents"))
-        self.assertTrue(self.context.audit.verify_chain())
+    def test_audit_hash_chain(self):
+        ctx = self.context("contextual")
+        ctx.authorization_engine.authorize(self.req(ctx, "read", "relevant_documents"))
+        self.assertTrue(ctx.audit.verify_chain())
 
 
 if __name__ == "__main__":

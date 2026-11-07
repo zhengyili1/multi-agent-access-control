@@ -27,6 +27,7 @@ class AuthorizationMode(str, Enum):
     RBAC = "rbac"
     INHERITED = "inherited"
     CONTEXTUAL = "contextual"
+    SEMANTIC = "semantic"
 
 
 TASK_ID = "INC-2026-001"

@@ -1,55 +1,79 @@
 # Multi-Agent Access Control Lab
 
-A runnable teaching lab on multi-agent access control, contextual authorization, semantic governance, delegation, and confused-deputy attacks. It uses simulated local resources and supports two LLM integrations against the Jetstream2 OpenAI-compatible endpoint: the OpenAI Agents SDK and LangChain.
+A teaching lab on multi-agent access control, contextual authorization, semantic governance, delegation, and confused-deputy attacks. The live workflow uses OpenAI Agents SDK specialists exposed to the orchestrator with `Agent.as_tool()`, plus LangChain semantic assessment. Both use the Jetstream2 OpenAI-compatible endpoint.
 
-## Requirements
+## Requirements and VM setup
 
-- Ubuntu 22.04/24.04 VM (one per student is recommended)
-- Python 3.11 or newer
-- Network access to the Jetstream2 LLM endpoint
-- No GPU and no Docker required
-
-## Set up the VM
+Use a Linux VM with Python 3.11+, network access to Jetstream2, and no GPU. Docker is not required.
 
 ```bash
 sudo apt update
 sudo apt install -y python3 python3-venv python3-pip git
-# Clone/download the course lab, then enter its directory
+# clone the course repository and enter its directory
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `.env` only if the instructor provides different endpoint settings. The default values target Jetstream2's `gpt-oss-120b` endpoint. Keep credentials out of source control.
+The default `.env.example` values use Jetstream2's `gpt-oss-120b` endpoint. Change them only if your instructor supplies different settings. Keep any credentials out of source control.
 
-## Run the deterministic exercises
+## Four experiments
 
-These do not call the LLM:
-
-```bash
-python main.py --mode all
-python main.py --mode contextual
-```
-
-## Run with Jetstream2
+Run reproducible policy scenarios without an LLM:
 
 ```bash
-python main.py --mode contextual --live
-python main.py --mode contextual --live --semantic
+python3 main.py --mode all
 ```
 
-Both the Agents SDK and LangChain use `JETSTREAM_BASE_URL`, `JETSTREAM_API_KEY`, and `JETSTREAM_MODEL_NAME` from `.env`. The Agents SDK connects through `OpenAIChatCompletionsModel` and `AsyncOpenAI`; LangChain uses `ChatOpenAI` with the same endpoint credentials. No OpenAI account key is needed when the provided Jetstream endpoint does not require one.
+Or run one level:
 
-The `--semantic` option asks LangChain to interpret task intent. Its result is advisory and does not grant authority. Authorization remains bound to the application-owned policy contract and enforced at each resource tool.
+```bash
+python3 main.py --mode inherited
+python3 main.py --mode rbac
+python3 main.py --mode contextual
+python3 main.py --mode semantic
+```
 
-## Modes and learning goals
+- **Inherited:** Vulnerable baseline. Copies the orchestrator's broad resources, actions, and destinations to specialists. Demonstrates excessive delegation and confused-deputy behavior.
+- **RBAC:** Uses static agent role/resource/action permissions. Demonstrates the limits and value of role checks without task purpose or data-flow context.
+- **Contextual:** Attenuates grants and checks task, session, purpose, destination, delegation chain, and action sequence. It blocks out-of-task access and external disclosure.
+- **Semantic:** Includes all contextual checks and adds a deterministic content/purpose risk assessment for offline repeatability. It checks classification, employee-identifying content, purpose mismatch, and external destinations.
 
-- `rbac`: static role/resource permissions.
-- `inherited`: deliberately vulnerable broad parent-grant copying, illustrating a confused deputy. This is application behavior, not automatic `Agent.as_tool()` permission inheritance.
-- `contextual`: task, session, purpose, resource, action, delegation, and composition checks.
+The deterministic scenarios include legitimate reads/report creation, unrelated HR access, prompt-injection-driven external sending, confidential-read-then-disclose composition, and purpose laundering. No email is sent; all data is simulated. Each decision is added to a local SQLite audit chain.
 
-The attack cases cover excessive delegation, instructions embedded in untrusted documents, and prohibited action composition. Email sending and all datasets are simulated; no external message is sent.
+## Jetstream2 live experiments
+
+Run the Agents SDK workflow, where the orchestrator calls specialist agents as tools:
+
+```bash
+python3 main.py --mode contextual --live
+```
+
+Run semantic mode with LangChain assessment at the task and each authorization boundary:
+
+```bash
+python3 main.py --mode semantic --live
+```
+
+Both integrations use `JETSTREAM_BASE_URL`, `JETSTREAM_API_KEY`, `JETSTREAM_MODEL_NAME`, `MODEL_TEMPERATURE`, and `LLM_TIMEOUT_SECONDS`. The Agents SDK uses `OpenAIChatCompletionsModel` with `AsyncOpenAI`; LangChain uses `ChatOpenAI` with the same endpoint settings. The semantic assessment can deny a high-risk request, but it cannot add permissions. Deterministic contextual checks remain mandatory. The default offline `--mode semantic` experiment uses a deterministic rule assessor so students can compare outcomes without an LLM call.
+
+For quick local checks:
+
+```bash
+python3 -m unittest test_lab.py
+```
+
+## Defense methods students can inspect or extend
+
+- **Least privilege / attenuation:** child grants are subsets of parent authority.
+- **Delegation-chain validation:** contextual and semantic modes reject missing, broadened, inconsistent, or over-depth grants.
+- **Task and purpose binding:** actions must match the trusted task contract.
+- **Contextual resource and destination checks:** data and outputs stay within task scope and approved destinations.
+- **Composition controls:** confidential reads cannot be followed by external disclosure.
+- **Semantic risk checks:** classify content and assess purpose/recipient risk; model output can flag or deny but cannot grant authority.
+- **Audit evidence:** each authorization decision is recorded in a hash-chained SQLite log.
+- **Tool boundary enforcement:** authorization runs inside the resource tool boundary; instructions and tool visibility are not treated as permission checks.
 
 ## Project structure
 
@@ -63,7 +87,7 @@ delegation.py
 authorization.py
 semantic_governance.py
 resources.py
-attacks.py
+attack_cases.py
 audit.py
 context.py
 test_lab.py
@@ -73,13 +97,4 @@ requirements.txt
 README.md
 ```
 
-## Exercises
-
-1. Add a specialist with a narrowly scoped role.
-2. Add a trusted task contract and attenuated child grant.
-3. Add a composition policy for a sequence of actions.
-4. Add approval requirements for high impact operations.
-5. Add policy version checks and explain how stale grants are rejected.
-6. Compare the three modes for utility, denial behavior, and audit evidence.
-
-This prototype is designed for instruction, not production authorization.
+This prototype is intended for instruction, not production authorization.

@@ -4,95 +4,301 @@ from pathlib import Path
 
 from audit import AuditLog
 from authorization import AuthorizationEngine
-from attacks import attack_cases
-from delegation import attenuate_grant, deliberately_inherit_grant, make_root_grant
+from attack_cases import attack_cases
+from delegation import (
+    attenuate_grant,
+    deliberately_inherit_grant,
+    make_root_grant,
+)
 from models import ActionRequest
 from settings import AuthorizationMode, ORIGINAL_TASK, SESSION_ID, TASK_ID
 from task_policy import trusted_incident_intent
 from context import AppContext
 
+
+# Each agent receives permissions based on its role.
+# The document agent can send internal reports through the email service.
 ROLE_SCOPE = {
-    "triage_agent": ({"incident_database"}, {"read", "analyze", "summarize"}),
-    "network_agent": ({"network_logs"}, {"read", "analyze", "summarize"}),
-    "endpoint_agent": ({"endpoint_logs"}, {"read", "analyze", "summarize"}),
-    "document_agent": ({"relevant_documents", "internal_incident_report"}, {"read", "analyze", "summarize", "create_internal_report"}),
+    "triage_agent": (
+        {"incident_database"},
+        {"read", "analyze", "summarize"},
+    ),
+    "network_agent": (
+        {"network_logs"},
+        {"read", "analyze", "summarize"},
+    ),
+    "endpoint_agent": (
+        {"endpoint_logs"},
+        {"read", "analyze", "summarize"},
+    ),
+    "document_agent": (
+        {
+            "relevant_documents",
+            "internal_incident_report",
+            "external_email_service",
+        },
+        {
+            "read",
+            "analyze",
+            "summarize",
+            "create_internal_report",
+            "send_email",
+        },
+    ),
 }
 
 
 def build_context(mode: str, db_path: str = "lab_audit.db") -> AppContext:
+    """Create the task policy, grants, audit log, and authorization engine."""
+
     intent = trusted_incident_intent(TASK_ID)
     audit = AuditLog(db_path)
+
+    # The root grant is deliberately broad.
+    # This allows the inherited mode to demonstrate excessive permissions.
     root = make_root_grant(
-        "security_analyst", TASK_ID, SESSION_ID,
-        {"incident_database", "network_logs", "endpoint_logs", "relevant_documents", "internal_incident_report", "external_email_service", "hr_records"},
-        {"read", "analyze", "summarize", "create_internal_report", "send_email", "external_disclosure"},
-        {"internal_report", "external_email"},
+        "security_analyst",
+        TASK_ID,
+        SESSION_ID,
+        {
+            "incident_database",
+            "network_logs",
+            "endpoint_logs",
+            "relevant_documents",
+            "internal_incident_report",
+            "external_email_service",
+            "hr_records",
+        },
+        {
+            "read",
+            "analyze",
+            "summarize",
+            "create_internal_report",
+            "send_email",
+            "external_disclosure",
+        },
+        {
+            "internal_report",
+            "external_email",
+        },
     )
+
     grants = {"orchestrator": root}
+
     for agent_id, (resources, actions) in ROLE_SCOPE.items():
+
         if mode == AuthorizationMode.INHERITED.value:
+            # Vulnerable baseline:
+            # Each agent inherits the orchestrator's broad permissions.
             grants[agent_id] = deliberately_inherit_grant(root, agent_id)
+
         else:
-            if mode == AuthorizationMode.CONTEXTUAL.value:
+            # Contextual and semantic modes restrict permissions
+            # according to the trusted task policy.
+            if mode in {
+                AuthorizationMode.CONTEXTUAL.value,
+                AuthorizationMode.SEMANTIC.value,
+            }:
                 resources = resources.intersection(intent.allowed_resources)
                 actions = actions.intersection(intent.allowed_actions)
-            grants[agent_id] = attenuate_grant(root, agent_id, set(resources), set(actions), {"internal_report"})
-    context = AppContext(mode=mode, task_id=TASK_ID, session_id=SESSION_ID, intent=intent, grants=grants, audit=audit)
+
+            destinations = {"internal_report"}
+
+            if mode == AuthorizationMode.RBAC.value:
+                resources = set(ROLE_SCOPE[agent_id][0])
+                actions = set(ROLE_SCOPE[agent_id][1])
+
+            grants[agent_id] = attenuate_grant(
+                root,
+                agent_id,
+                set(resources),
+                set(actions),
+                destinations,
+            )
+
+    context = AppContext(
+        mode=mode,
+        task_id=TASK_ID,
+        session_id=SESSION_ID,
+        intent=intent,
+        grants=grants,
+        audit=audit,
+    )
+
     context.authorization_engine = AuthorizationEngine(mode, context)
+
     return context
 
 
 def run_deterministic(mode: str):
+    """Run predefined requests and attack cases without executing real actions."""
+
     db = f"lab_{mode}.db"
+
+    # Start with a clean audit database for each experiment.
     if Path(db).exists():
         Path(db).unlink()
+
     context = build_context(mode, db)
+
     print(f"\n=== Authorization mode: {mode.upper()} ===")
-    for req in [
-        ActionRequest("network_agent", "read", "network_logs", context.intent.purpose, TASK_ID, SESSION_ID),
-        ActionRequest("document_agent", "read", "relevant_documents", context.intent.purpose, TASK_ID, SESSION_ID, content_classification="confidential"),
-    ]:
+
+    # Normal operations and basic unauthorized requests.
+    requests = [
+        ActionRequest(
+            "network_agent",
+            "read",
+            "network_logs",
+            context.intent.purpose,
+            TASK_ID,
+            SESSION_ID,
+        ),
+
+        ActionRequest(
+            "document_agent",
+            "read",
+            "relevant_documents",
+            context.intent.purpose,
+            TASK_ID,
+            SESSION_ID,
+            content_classification="confidential",
+            content="Incident note about Alice's suspicious host access.",
+        ),
+
+        ActionRequest(
+            "document_agent",
+            "read",
+            "hr_records",
+            context.intent.purpose,
+            TASK_ID,
+            SESSION_ID,
+            content_classification="confidential",
+            content="Employee Alice compensation record.",
+        ),
+
+        # Direct external disclosure.
+        ActionRequest(
+            "document_agent",
+            "send_email",
+            "external_email_service",
+            context.intent.purpose,
+            TASK_ID,
+            SESSION_ID,
+            "external_email",
+            "confidential",
+            "Incident report includes Alice's confidential investigation details.",
+            "attacker@example.com",
+        ),
+
+        # Legitimate internal report creation.
+        ActionRequest(
+            "document_agent",
+            "create_internal_report",
+            "internal_incident_report",
+            context.intent.purpose,
+            TASK_ID,
+            SESSION_ID,
+            "internal_report",
+            "confidential",
+            "Alice's host accessed a sensitive internal service.",
+        ),
+    ]
+
+    for req in requests:
         decision = context.authorization_engine.authorize(req)
-        print(f"[{'ALLOW' if decision.allowed else 'DENY'}] legitimate {req.agent_id} -> {req.resource}: {decision.reason}")
+
+        print(
+            f"[{'ALLOW' if decision.allowed else 'DENY'}] "
+            f"scenario {req.action} {req.resource}: {decision.reason}"
+        )
+
+    # Run the attack cases, including the disguised-recipient attack.
     for name, req in attack_cases(context):
         decision = context.authorization_engine.authorize(req)
-        print(f"[{'ALLOW' if decision.allowed else 'DENY'}] attack {name}: {decision.reason}")
-    print(f"Audit events: {len(context.audit.rows())}; chain valid: {context.audit.verify_chain()}")
+
+        print(
+            f"[{'ALLOW' if decision.allowed else 'DENY'}] "
+            f"attack {name}: {decision.reason}"
+        )
+
+    print(
+        f"Audit events: {len(context.audit.rows())}; "
+        f"chain valid: {context.audit.verify_chain()}"
+    )
+
     return context
 
 
-async def run_live(mode: str, semantic: bool):
+async def run_live(mode: str):
+    """Run the multi-agent system using the Jetstream2-backed model."""
+
     from agents import Runner
     from agent_system import build_agents
-    context = build_context(mode, f"lab_live_{mode}.db")
-    if semantic:
-        from semantic_governance import analyze_task_with_langchain, compare_assessment_to_contract
-        assessment = analyze_task_with_langchain(ORIGINAL_TASK)
-        print("\nLangChain semantic assessment:")
-        print(assessment.model_dump_json(indent=2))
-        print("Contract warnings:", compare_assessment_to_contract(assessment, context.intent))
-    result = await Runner.run(build_agents(mode)["orchestrator"], input=ORIGINAL_TASK, context=context, max_turns=20)
+
+    db = f"lab_live_{mode}.db"
+
+    if Path(db).exists():
+        Path(db).unlink()
+
+    context = build_context(mode, db)
+
+    # Semantic authorization calls LangChain at the authorization boundary.
+    # No separate task assessment is needed here.
+    result = await Runner.run(
+        build_agents(mode)["orchestrator"],
+        input=ORIGINAL_TASK,
+        context=context,
+        max_turns=20,
+    )
+
     print("\n=== Orchestrator final report ===")
     print(result.final_output)
-    print(f"\nAudit events: {len(context.audit.rows())}; chain valid: {context.audit.verify_chain()}")
+
+    print(
+        f"\nAudit events: {len(context.audit.rows())}; "
+        f"chain valid: {context.audit.verify_chain()}"
+    )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Multi-agent access-control lab")
-    parser.add_argument("--mode", choices=["rbac", "inherited", "contextual", "all"], default="all")
-    parser.add_argument("--live", action="store_true", help="Run Jetstream2-backed Agents SDK agents.")
-    parser.add_argument("--semantic", action="store_true", help="Run LangChain semantic analysis (requires --live).")
+    parser = argparse.ArgumentParser(
+        description="Multi-agent access-control lab"
+    )
+
+    parser.add_argument(
+        "--mode",
+        choices=["inherited", "rbac", "contextual", "semantic", "all"],
+        default="all",
+    )
+
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Run Jetstream2-backed Agents SDK agents.",
+    )
+
     args = parser.parse_args()
+
     if args.live:
         if args.mode == "all":
-            raise SystemExit("Choose one mode for --live: rbac, inherited, or contextual.")
-        asyncio.run(run_live(args.mode, args.semantic))
+            raise SystemExit(
+                "Choose one mode for --live: "
+                "inherited, rbac, contextual, or semantic."
+            )
+
+        asyncio.run(run_live(args.mode))
+
     else:
-        if args.semantic:
-            raise SystemExit("--semantic requires --live.")
-        for mode in (["rbac", "inherited", "contextual"] if args.mode == "all" else [args.mode]):
+        modes = (
+            ["inherited", "rbac", "contextual", "semantic"]
+            if args.mode == "all"
+            else [args.mode]
+        )
+
+        for mode in modes:
             run_deterministic(mode)
 
 
 if __name__ == "__main__":
     main()
+

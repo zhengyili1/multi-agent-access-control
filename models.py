@@ -42,6 +42,8 @@ class ActionRequest:
     session_id: str
     destination: str | None = None
     content_classification: str = "internal"
+    content: str = ""
+    recipient: str | None = None
 
 
 @dataclass

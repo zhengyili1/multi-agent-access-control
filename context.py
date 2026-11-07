@@ -15,3 +15,4 @@ class AppContext:
     action_history: list[dict[str, Any]] = field(default_factory=list)
     audit: Any = None
     authorization_engine: Any = None
+    semantic_assessor: Any = None
