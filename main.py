@@ -1,8 +1,6 @@
 import argparse
 import asyncio
-from pathlib import Path
 
-from audit import AuditLog
 from authorization import AuthorizationEngine
 from attack_cases import attack_cases
 from delegation import (
@@ -17,7 +15,6 @@ from context import AppContext
 
 
 # Each agent receives permissions based on its role.
-# The document agent can send internal reports through the email service.
 ROLE_SCOPE = {
     "triage_agent": (
         {"incident_database"},
@@ -48,11 +45,10 @@ ROLE_SCOPE = {
 }
 
 
-def build_context(mode: str, db_path: str = "lab_audit.db") -> AppContext:
-    """Create the task policy, grants, audit log, and authorization engine."""
+def build_context(mode: str) -> AppContext:
+    """Create the task policy, grants, and authorization engine."""
 
     intent = trusted_incident_intent(TASK_ID)
-    audit = AuditLog(db_path)
 
     # The root grant is deliberately broad.
     # This allows the inherited mode to demonstrate excessive permissions.
@@ -88,13 +84,11 @@ def build_context(mode: str, db_path: str = "lab_audit.db") -> AppContext:
     for agent_id, (resources, actions) in ROLE_SCOPE.items():
 
         if mode == AuthorizationMode.INHERITED.value:
-            # Vulnerable baseline:
-            # Each agent inherits the orchestrator's broad permissions.
+            # Vulnerable baseline: inherit the orchestrator's broad permissions.
             grants[agent_id] = deliberately_inherit_grant(root, agent_id)
 
         else:
-            # Contextual and semantic modes restrict permissions
-            # according to the trusted task policy.
+            # Contextual and semantic modes also apply the trusted task policy.
             if mode in {
                 AuthorizationMode.CONTEXTUAL.value,
                 AuthorizationMode.SEMANTIC.value,
@@ -122,7 +116,6 @@ def build_context(mode: str, db_path: str = "lab_audit.db") -> AppContext:
         session_id=SESSION_ID,
         intent=intent,
         grants=grants,
-        audit=audit,
     )
 
     context.authorization_engine = AuthorizationEngine(mode, context)
@@ -131,19 +124,12 @@ def build_context(mode: str, db_path: str = "lab_audit.db") -> AppContext:
 
 
 def run_deterministic(mode: str):
-    """Run predefined requests and attack cases without executing real actions."""
+    """Run predefined requests and attack cases without real actions."""
 
-    db = f"lab_{mode}.db"
-
-    # Start with a clean audit database for each experiment.
-    if Path(db).exists():
-        Path(db).unlink()
-
-    context = build_context(mode, db)
+    context = build_context(mode)
 
     print(f"\n=== Authorization mode: {mode.upper()} ===")
 
-    # Normal operations and basic unauthorized requests.
     requests = [
         ActionRequest(
             "network_agent",
@@ -221,13 +207,6 @@ def run_deterministic(mode: str):
             f"attack {name}: {decision.reason}"
         )
 
-    print(
-        f"Audit events: {len(context.audit.rows())}; "
-        f"chain valid: {context.audit.verify_chain()}"
-    )
-
-    return context
-
 
 async def run_live(mode: str):
     """Run the multi-agent system using the Jetstream2-backed model."""
@@ -235,15 +214,8 @@ async def run_live(mode: str):
     from agents import Runner
     from agent_system import build_agents
 
-    db = f"lab_live_{mode}.db"
+    context = build_context(mode)
 
-    if Path(db).exists():
-        Path(db).unlink()
-
-    context = build_context(mode, db)
-
-    # Semantic authorization calls LangChain at the authorization boundary.
-    # No separate task assessment is needed here.
     result = await Runner.run(
         build_agents(mode)["orchestrator"],
         input=ORIGINAL_TASK,
@@ -253,11 +225,6 @@ async def run_live(mode: str):
 
     print("\n=== Orchestrator final report ===")
     print(result.final_output)
-
-    print(
-        f"\nAudit events: {len(context.audit.rows())}; "
-        f"chain valid: {context.audit.verify_chain()}"
-    )
 
 
 def main():

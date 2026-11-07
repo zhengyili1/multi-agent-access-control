@@ -207,3 +207,4 @@ def build_resource_tools(agent_id: str):
     }
 
     return tool_map.get(agent_id, [])
+

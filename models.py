@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any
 
 
 @dataclass(frozen=True)
@@ -51,24 +49,3 @@ class Decision:
     allowed: bool
     reason: str
     checks: dict[str, bool] = field(default_factory=dict)
-    event_id: str | None = None
-
-
-@dataclass
-class AuditEvent:
-    event_id: str
-    timestamp: str
-    agent_id: str
-    action: str
-    resource: str
-    purpose: str
-    decision: str
-    reason: str
-    grant_id: str | None
-    session_id: str
-    previous_hash: str
-    event_hash: str
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
