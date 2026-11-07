@@ -153,117 +153,125 @@ def composition_allows(request: ActionRequest, history: list[dict]) -> tuple[boo
     return True, "No prohibited action composition detected."
 
 
+
 class AuthorizationEngine:
     """
-    Policy enforcement point for simulated resource operations.
+    Controls whether an agent can access a resource or perform an action.
 
-    C1 identity/delegation, C2 scope/composition, C3 task/session context,
-    C4 approval placeholder, C5 evidence/audit, C6 intent binding.
+    Three authorization modes:
+    - RBAC: Check static role permissions.
+    - Inherited: Check permissions inherited from the parent agent.
+    - Contextual: Check permissions, task context, action history,
+      sensitive actions, and original task intent.
+
+    Based on six APC conditions:
+    C1: Identity
+    C2: Scope and composition
+    C3: Task and session context
+    C4: Sensitive action restrictions
+    C5: Audit evidence
+    C6: Task intent
     """
 
-    def __init__(self, mode: str, context):
+    def __init__(self, mode, context):
         self.mode = mode
         self.context = context
 
-    def authorize(self, request: ActionRequest) -> Decision:
+    def authorize(self, request):
+        """Check whether an agent's requested action is allowed."""
+
+        # C1: Verify agent identity.
         grant = self.context.grants.get(request.agent_id)
-        checks: dict[str, bool] = {}
 
-        # C1: Identity binding: the acting principal must have a grant.
-        checks["C1_identity"] = grant is not None and grant.principal == request.agent_id
-        if not checks["C1_identity"]:
-            return self._finish(request, Decision(False, "No valid grant for acting agent.", checks), None)
+        if grant is None or grant.principal != request.agent_id:
+            return self._finish(request, False, "Invalid agent.")
 
-        # C3: Bind action to the correct task and session.
-        checks["C3_context"] = (
+        # C3: Verify task and session.
+        if not self._check_context(request, grant):
+            return self._finish(request, False, "Context mismatch.")
+
+        # RBAC: Check static role permissions.
+        if self.mode == "rbac":
+            allowed = rbac_allows(request.agent_id, request)
+            return self._finish(request, allowed, "RBAC decision.", grant.grant_id)
+
+        # Inherited: Check the parent's delegated permissions.
+        if self.mode == "inherited":
+            allowed = self._check_scope(request, grant)
+            return self._finish(
+                request, allowed, "Inherited permission decision.", grant.grant_id
+            )
+
+        # Contextual: Evaluate APC conditions.
+        checks = {
+            "scope": self._check_scope(request, grant),
+            "composition": self._check_composition(request),
+            "safety": self._check_safety(request),
+            "intent": self._check_intent(request),
+            "audit": self.context.audit is not None,
+        }
+
+        allowed = all(checks.values())
+
+        failed = [name for name, passed in checks.items() if not passed]
+        reason = "All checks passed." if allowed else "Failed: " + ", ".join(failed)
+
+        return self._finish(request, allowed, reason, grant.grant_id)
+
+    def _check_context(self, request, grant):
+        """C3: Check that the action belongs to the correct task and session."""
+        return (
             request.task_id == grant.task_id == self.context.task_id
             and request.session_id == grant.session_id == self.context.session_id
         )
-        if not checks["C3_context"]:
-            return self._finish(request, Decision(False, "Task/session context mismatch.", checks), grant.grant_id)
 
-        if self.mode == "rbac":
-            # RBAC is intentionally a static role check. It does not reason about
-            # the user's task, semantic purpose, or sequences of actions.
-            allowed = rbac_allows(request.agent_id, request)
-            checks["C2_scope"] = allowed
-            checks["C6_intent"] = True
-            checks["C4_approval"] = True
-            checks["C5_evidence"] = True
-            return self._finish(
-                request,
-                Decision(allowed, "Static RBAC allow." if allowed else "Static RBAC deny.", checks),
-                grant.grant_id,
+    def _check_scope(self, request, grant):
+        """C2: Check that the action and resource are within delegated permissions."""
+        return (
+            request.action in grant.actions
+            and request.resource in grant.resources
+            and (
+                request.destination is None
+                or request.destination in grant.destinations
             )
-
-        if self.mode == "inherited":
-            # Deliberately vulnerable comparison: the child received the parent's
-            # broad grant, and the enforcement point checks only that broad grant.
-            # No semantic task binding or session-wide composition control is used.
-            in_scope = (
-                request.action in grant.actions
-                and request.resource in grant.resources
-                and (request.destination is None or request.destination in grant.destinations)
-            )
-            checks["C2_scope"] = in_scope
-            checks["C4_approval"] = True
-            checks["C5_evidence"] = self.context.audit is not None
-            allowed = all(checks.values())
-            reason = (
-                "Broad inherited grant accepted action (intentionally vulnerable baseline)."
-                if allowed else "Action is outside the broad inherited grant or audit is unavailable."
-            )
-            return self._finish(request, Decision(allowed, reason, checks), grant.grant_id)
-
-        # C2: Grant scope and action composition.
-        checks["C2_scope"] = (
-            request.action in grant.actions and request.resource in grant.resources
-            and (request.destination is None or request.destination in grant.destinations)
         )
-        composition_ok, composition_reason = composition_allows(
+
+    def _check_composition(self, request):
+        """C2: Check whether previous actions make this action unsafe."""
+        allowed, _ = composition_allows(
             request, self.context.action_history
         )
-        checks["C2_composition"] = composition_ok
+        return allowed
 
-        # C6: Intent binding against application-owned task contract.
-        intent_ok, intent_reason = semantic_contract_allows(request, self.context.intent)
-        checks["C6_intent"] = intent_ok
-
-        # C4: Approval is not needed for the simulated read/analyze operations.
-        # External disclosure is never made approvable by this prototype.
-        checks["C4_approval"] = request.action not in {
-            "external_disclosure", "send_email", "send"
+    def _check_safety(self, request):
+        """C4: Prohibit sensitive external disclosure operations."""
+        return request.action not in {
+            "send_email", "external_disclosure", "send"
         }
 
-        # C5: evidence sink availability. Fail closed if no audit service exists.
-        checks["C5_evidence"] = self.context.audit is not None
+    def _check_intent(self, request):
+        """C6: Check whether the action matches the original task."""
+        allowed, _ = semantic_contract_allows(
+            request, self.context.intent
+        )
+        return allowed
 
-        all_ok = all(checks.values())
-        reasons = []
-        if not checks["C2_scope"]:
-            reasons.append("Action/resource/destination outside delegated grant.")
-        if not composition_ok:
-            reasons.append(composition_reason)
-        if not intent_ok:
-            reasons.append(intent_reason)
-        if not checks["C4_approval"]:
-            reasons.append("External disclosure is not approved in this lab.")
-        if not checks["C5_evidence"]:
-            reasons.append("Audit evidence sink unavailable; fail closed.")
+    def _finish(self, request, allowed, reason, grant_id=None):
+        """C5: Record the authorization decision and update action history."""
+        decision = Decision(allowed, reason, {})
 
-        reason = "All authorization checks passed." if all_ok else " ".join(reasons)
-        return self._finish(request, Decision(all_ok, reason, checks), grant.grant_id)
-
-    def _finish(self, request, decision: Decision, grant_id: str | None) -> Decision:
         if self.context.audit is not None:
-            decision.event_id = self.context.audit.record(request, decision, grant_id)
+            decision.event_id = self.context.audit.record(
+                request, decision, grant_id
+            )
+
         self.context.action_history.append({
             "agent_id": request.agent_id,
             "action": request.action,
             "resource": request.resource,
-            "classification": request.content_classification,
-            "destination": request.destination,
-            "decision": "ALLOW" if decision.allowed else "DENY",
+            "decision": "ALLOW" if allowed else "DENY",
             "event_id": decision.event_id,
         })
+
         return decision
+
